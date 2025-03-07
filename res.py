@@ -3,6 +3,7 @@ import logging
 import time
 import json
 import os
+import random
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 
@@ -22,8 +23,9 @@ group_mapping = {}
 #   "source_name": nombre del grupo fuente (en minúsculas)
 #   "source_id": id del grupo fuente (privado)
 #   "dest": id del chat destino donde se reenviarán los mensajes
-#   "last_message_id": id del último mensaje reenviado (para evitar duplicados)
-#   "last_forwarded_time": timestamp del último reenvío (para permitir 1 por hora)
+#   "last_message_id": id del último mensaje reenviado (opcional, para detectar nuevos mensajes)
+#   "last_forwarded_time": timestamp del último reenvío (para controlar el intervalo)
+#   "next_interval": intervalo en segundos para el próximo envío (entre 1800 y 3600)
 automensajes = []
 
 # Diccionario para llevar registro del último saludo enviado a cada usuario (clave: sender_id, valor: fecha)
@@ -84,9 +86,8 @@ async def automensaje_forwarder():
     """
     Tarea en segundo plano que revisa cada minuto:
       - Si la hora (según Perú) está entre 5:01am y 11:59pm,
-      - Y ha pasado al menos 1 hora desde el último reenvío de cada automensaje,
-        obtiene el último mensaje del grupo fuente y, si es nuevo,
-        lo reenvía al chat destino configurado.
+      - Y ha pasado el intervalo configurado desde el último reenvío,
+        obtiene el último mensaje del grupo fuente y lo reenvía al chat destino.
     """
     while True:
         now = get_peru_time()
@@ -94,26 +95,24 @@ async def automensaje_forwarder():
         if (now.hour > 5) or (now.hour == 5 and now.minute >= 1):
             current_timestamp = time.time()
             for config in automensajes:
-                if current_timestamp - config.get("last_forwarded_time", 0) >= 3600:
+                next_interval = config.get("next_interval", 3600)
+                if current_timestamp - config.get("last_forwarded_time", 0) >= next_interval:
                     try:
                         source_entity = await client.get_entity(config["source_id"])
                         messages = await client.get_messages(source_entity, limit=1)
                         if messages:
                             latest_msg = messages[0]
+                            dest_chat_id = config["dest"]
+                            # Reenviar el mensaje utilizando forward para conservar formato y emojis premium
+                            await client.forward_messages(dest_chat_id, latest_msg.id, source_entity)
+                            config["last_forwarded_time"] = current_timestamp
+                            # Si se detecta un mensaje nuevo, se actualiza (esto es opcional)
                             if config.get("last_message_id") != latest_msg.id:
-                                dest_chat_id = config["dest"]
-                                if latest_msg.media:
-                                    await client.send_file(
-                                        dest_chat_id,
-                                        file=latest_msg.media,
-                                        caption=latest_msg.text if latest_msg.text else ""
-                                    )
-                                else:
-                                    await client.send_message(dest_chat_id, latest_msg.text)
                                 config["last_message_id"] = latest_msg.id
-                                config["last_forwarded_time"] = current_timestamp
-                                save_automensajes()
-                                print(f"Reenviado mensaje del grupo '{config['source_name']}' al chat {dest_chat_id}.")
+                            # Establecer un nuevo intervalo aleatorio entre 30min y 1h para el próximo envío
+                            config["next_interval"] = random.randint(1800, 3600)
+                            save_automensajes()
+                            print(f"Reenviado mensaje del grupo '{config['source_name']}' al chat {dest_chat_id}.")
                     except Exception as e:
                         print(f"Error en automensaje para '{config.get('source_name', 'desconocido')}': {e}")
         await asyncio.sleep(60)  # Revisa cada minuto
@@ -135,7 +134,6 @@ async def start_bot():
     @client.on(events.NewMessage(pattern=r'^/addgrupo (\w+)$'))
     async def add_group_handler(event):
         if event.sender_id != me.id:
-            print(f"")
             return
 
         group_name = event.pattern_match.group(1).lower()
@@ -159,12 +157,11 @@ async def start_bot():
     @client.on(events.NewMessage(pattern=r'^/borrargrupo (\w+)$'))
     async def delete_group_handler(event):
         if event.sender_id != me.id:
-            print(f"")
             return
 
         group_name = event.pattern_match.group(1).lower()
         if group_name not in group_mapping:
-            await event.reply(f"")
+            await event.reply(f"Grupo '{group_name}' no existe.")
             return
 
         del group_mapping[group_name]
@@ -175,7 +172,6 @@ async def start_bot():
     @client.on(events.NewMessage(pattern=r'^/(vergrupos|listagrupos)$'))
     async def list_groups_handler(event):
         if event.sender_id != me.id:
-            print(f"")
             return
 
         if not group_mapping:
@@ -197,7 +193,7 @@ async def start_bot():
             return
 
         if command not in group_mapping:
-            await event.reply(f"")
+            await event.reply(f"Grupo '{command}' no registrado.")
             return
 
         target_entity = group_mapping[command]
@@ -256,7 +252,8 @@ async def start_bot():
             "source_id": source_entity.id,
             "dest": event.chat_id,
             "last_message_id": None,
-            "last_forwarded_time": 0
+            "last_forwarded_time": 0,
+            "next_interval": random.randint(1800, 3600)
         })
         save_automensajes()
         await event.reply(f"Automensaje configurado: se reenviarán mensajes del grupo privado '{source_name}' a este chat en horario permitido.")
@@ -265,7 +262,6 @@ async def start_bot():
     @client.on(events.NewMessage(pattern=r'^/(verautomensajes|listautomensajes)$'))
     async def list_automensajes_handler(event):
         if event.sender_id != me.id:
-            print(f"Comando de listado de automensajes ignorado de usuario: {event.sender_id}")
             return
 
         if not automensajes:
@@ -281,7 +277,6 @@ async def start_bot():
     @client.on(events.NewMessage(pattern=r'^/borrarautomensaje (\w+)$'))
     async def delete_automensaje_handler(event):
         if event.sender_id != me.id:
-            print(f"")
             return
 
         source_name = event.pattern_match.group(1).lower()
