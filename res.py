@@ -148,6 +148,10 @@ async def start_bot():
     # ------------------ Responder a respuestas enviando mensaje privado (una vez al día por usuario) ------------------
     @client.on(events.NewMessage)
     async def reply_greeting_handler(event):
+        # Procesar solo si el mensaje proviene de un grupo
+        if not event.is_group:
+            return
+
         # Si el mensaje es una respuesta y el remitente no es el bot
         if event.is_reply and event.sender_id != me.id:
             try:
