@@ -11,8 +11,10 @@ API_ID = 9161657
 API_HASH = '400dafb52292ea01a8cf1e5c1756a96a'
 PHONE_NUMBER = '+51981119038'
 
-# Archivo para almacenar la memoria de grupos (para la funcionalidad existente)
+# Archivo para almacenar la memoria de grupos (funcionalidad existente)
 GROUPS_FILE = 'groups.json'
+# Archivo para almacenar la memoria de automensajes (nueva persistencia)
+AUTOMESSAGES_FILE = 'automensajes.json'
 
 # Diccionario para almacenar la información de grupos agregados (funcionalidad existente)
 group_mapping = {}
@@ -52,6 +54,39 @@ def save_groups():
             json.dump(data, f)
     except Exception as e:
         print(f"Error al guardar en {GROUPS_FILE}: {e}")
+
+def save_automessages():
+    """Guarda la configuración de los automensajes en un archivo JSON (sin la tarea asyncio)."""
+    data = {}
+    for dest_chat_id, info in auto_messages.items():
+        data[str(dest_chat_id)] = {
+            "alias": info["alias"],
+            "source_group": info["source_group"]
+        }
+    try:
+        with open(AUTOMESSAGES_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Error al guardar en {AUTOMESSAGES_FILE}: {e}")
+
+async def load_automessages():
+    """Carga la configuración de los automensajes y recrea las tareas."""
+    global auto_messages
+    if os.path.exists(AUTOMESSAGES_FILE):
+        try:
+            with open(AUTOMESSAGES_FILE, 'r') as f:
+                data = json.load(f)
+            for dest_chat_id_str, info in data.items():
+                dest_chat_id = int(dest_chat_id_str)
+                # Recrear la tarea para el automensaje
+                task = asyncio.create_task(auto_message_loop(dest_chat_id, info["source_group"]))
+                auto_messages[dest_chat_id] = {
+                    "alias": info["alias"],
+                    "source_group": info["source_group"],
+                    "task": task
+                }
+        except Exception as e:
+            print(f"Error al cargar automensajes desde {AUTOMESSAGES_FILE}: {e}")
 
 def get_peru_time():
     """Obtiene la hora actual en Perú (UTC-5, sin considerar DST)."""
@@ -102,6 +137,8 @@ async def cleanup_tasks():
         for group_id in to_remove:
             del auto_messages[group_id]
             print(f"Automensaje limpiado para el grupo destino ID: {group_id}.")
+        if to_remove:
+            save_automessages()
 
 async def start_bot():
     await client.start(phone=PHONE_NUMBER)
@@ -110,6 +147,8 @@ async def start_bot():
     
     # Cargar grupos almacenados (funcionalidad existente)
     await load_groups()
+    # Cargar automensajes guardados y recrear las tareas
+    await load_automessages()
 
     # Iniciar tarea de autolimpiado de automensajes
     asyncio.create_task(cleanup_tasks())
@@ -131,7 +170,7 @@ async def start_bot():
                 break
 
         if target_entity is None:
-            await event.reply(f"Grupo '{group_name}' no encontrado.")
+            await event.reply(f"")
             return
 
         group_mapping[group_name] = target_entity
@@ -253,6 +292,7 @@ async def start_bot():
             "source_group": source_group,
             "task": task
         }
+        save_automessages()
         await event.reply(f"Automensaje activado en el grupo '{group_alias}' reenviando mensajes desde el grupo '{source_group}'.")
         print(f"Automensaje activado en el grupo '{group_alias}' (ID: {destination_chat_id}) reenviando desde '{source_group}'.")
 
@@ -281,6 +321,7 @@ async def start_bot():
                 return
             auto_messages[group_id]['task'].cancel()
             del auto_messages[group_id]
+            save_automessages()
             await event.reply("Automensaje eliminado para este grupo.")
             print(f"Automensaje eliminado para el grupo destino ID: {group_id}.")
         else:
@@ -290,6 +331,7 @@ async def start_bot():
                 if info['alias'] == param or info['source_group'] == param:
                     auto_messages[group_id]['task'].cancel()
                     del auto_messages[group_id]
+                    save_automessages()
                     await event.reply(f"Automensaje eliminado para el grupo '{param}'.")
                     print(f"Automensaje eliminado para el grupo '{param}' (destino ID: {group_id}).")
                     found = True
@@ -308,3 +350,4 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Error: {e}. Reintentando en 5 segundos...")
             time.sleep(5)
+
