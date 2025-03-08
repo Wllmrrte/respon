@@ -20,8 +20,8 @@ group_mapping = {}
 # Diccionario para almacenar el último saludo enviado a cada usuario (funcionalidad existente)
 last_greetings = {}
 
-# Nuevo diccionario para almacenar los automensajes activos.
-# Clave: ID del grupo; Valor: dict con alias, spam_msg y task (objeto de asyncio.Task)
+# Diccionario para almacenar los automensajes activos.
+# Clave: ID del grupo destino; Valor: dict con alias, source_group y task (objeto de asyncio.Task)
 auto_messages = {}
 
 # Crear el cliente de Telegram (la sesión se guarda en "session.session")
@@ -57,25 +57,37 @@ def get_peru_time():
     """Obtiene la hora actual en Perú (UTC-5, sin considerar DST)."""
     return datetime.utcnow() - timedelta(hours=5)
 
-async def auto_message_loop(chat_id, spam_msg):
-    """Bucle infinito que envía el mensaje spam cada 35 minutos, 
-    evitando hacerlo entre 1:00am y 5:30am hora Perú."""
+async def auto_message_loop(destination_chat_id, source_group):
+    """
+    Bucle infinito que reenvía los últimos mensajes del grupo 'source_group'
+    al grupo destino cada 40 minutos, evitando hacerlo entre 1:00am y 5:30am hora Perú.
+    """
     while True:
         peru_time = get_peru_time()
         # Si la hora actual está entre 1:00 y 5:30, se espera hasta las 5:30
         if peru_time.hour >= 1 and (peru_time.hour < 5 or (peru_time.hour == 5 and peru_time.minute < 30)):
             now = peru_time
             allowed_time = now.replace(hour=5, minute=30, second=0, microsecond=0)
-            # Si ya pasó las 5:30, ajustar al día siguiente (aunque en esta condición no ocurrirá)
             if now >= allowed_time:
                 allowed_time += timedelta(days=1)
             seconds_to_wait = (allowed_time - now).total_seconds()
             await asyncio.sleep(seconds_to_wait)
             continue
         try:
-            await client.send_message(chat_id, spam_msg)
+            if source_group not in group_mapping:
+                print(f"El grupo '{source_group}' no existe en la memoria.")
+            else:
+                target_entity = group_mapping[source_group]
+                messages = await client.get_messages(target_entity, limit=100)
+                if not messages:
+                    print(f"No se encontraron mensajes en el grupo '{source_group}'.")
+                else:
+                    # Revertir el orden para reenviar en orden cronológico
+                    messages = list(reversed(messages))
+                    message_ids = [msg.id for msg in messages]
+                    await client.forward_messages(destination_chat_id, message_ids, target_entity)
         except Exception as e:
-            print(f"Error al enviar automensaje en {chat_id}: {e}")
+            print(f"Error al reenviar automensaje en {destination_chat_id}: {e}")
         await asyncio.sleep(40 * 60)  # espera 40 minutos
 
 async def cleanup_tasks():
@@ -89,7 +101,7 @@ async def cleanup_tasks():
                 to_remove.append(group_id)
         for group_id in to_remove:
             del auto_messages[group_id]
-            print(f"")
+            print(f"Automensaje limpiado para el grupo destino ID: {group_id}.")
 
 async def start_bot():
     await client.start(phone=PHONE_NUMBER)
@@ -162,11 +174,11 @@ async def start_bot():
 
         command = event.pattern_match.group(1).lower()
         # Excluir comandos reservados
-        if command in ['addgrupo', 'borrargrupo', 'vergrupos', 'listagrupos']:
+        if command in ['addgrupo', 'borrargrupo', 'vergrupos', 'listagrupos', 'automensaje', 'borrarautomensaje', 'verautomensajes']:
             return
 
         if command not in group_mapping:
-            await event.reply(f"")
+            await event.reply(f"Grupo '{command}' no registrado.")
             return
 
         target_entity = group_mapping[command]
@@ -175,11 +187,9 @@ async def start_bot():
             await event.reply(f"No se encontró información en el grupo '{command}'.")
             return
 
-        # Revertir el orden para reenviar en orden cronológico
         messages = list(reversed(messages))
         message_ids = [msg.id for msg in messages]
         try:
-            # Reenvía los mensajes exactamente como fueron enviados, conservando formato y emojis
             await client.forward_messages(event.chat_id, message_ids, target_entity)
         except Exception as e:
             print(f"Error al reenviar mensajes: {e}")
@@ -187,22 +197,17 @@ async def start_bot():
     # ------------------ Responder a respuestas enviando mensaje privado (funcionalidad existente) ------------------
     @client.on(events.NewMessage)
     async def reply_greeting_handler(event):
-        # Procesar solo si el mensaje proviene de un grupo
         if not event.is_group:
             return
 
-        # Si el mensaje es una respuesta y el remitente no es el bot
         if event.is_reply and event.sender_id != me.id:
             try:
                 current_date = get_peru_time().date()
-                # Verificar si ya se envió un saludo hoy a este usuario
                 if event.sender_id in last_greetings and last_greetings[event.sender_id] == current_date:
                     return
                 replied_msg = await event.get_reply_message()
-                # Comprobar que el mensaje respondido fue enviado por el bot
                 if replied_msg.sender_id == me.id:
                     greeting = "¡Hola! ¿Estás interesado en comprar LEDERDATABOT? ☺️"
-                    # Enviar el saludo en privado al usuario que respondió
                     if replied_msg.media:
                         await client.send_file(
                             event.sender_id,
@@ -211,45 +216,45 @@ async def start_bot():
                         )
                     else:
                         await client.send_message(event.sender_id, greeting)
-                    # Registrar que ya se envió el saludo hoy
                     last_greetings[event.sender_id] = current_date
             except Exception as e:
                 print(f"Error al enviar saludo: {e}")
 
-    # ------------------ Nuevos comandos para Automensajes ------------------
+    # ------------------ Nuevo comando para Automensajes ------------------
     @client.on(events.NewMessage(pattern=r'^/automensaje (\S+)$'))
     async def add_auto_message_handler(event):
         if event.sender_id != me.id:
             return
-        spam_command = event.pattern_match.group(1).strip()
-        # Asegurarse de que el comando spam comience con '/'
-        if not spam_command.startswith('/'):
-            spam_command = '/' + spam_command
-
         if not event.is_group:
             await event.reply("El comando /automensaje solo puede usarse en grupos.")
             return
 
         chat = await event.get_chat()
-        group_id = chat.id
-        # Crear un alias corto a partir del título del grupo (se usa la primera palabra en minúsculas)
-        if hasattr(chat, 'title') and chat.title:
-            group_alias = chat.title.split()[0].lower()
-        else:
-            group_alias = str(group_id)
+        destination_chat_id = chat.id
 
-        if group_id in auto_messages:
+        if destination_chat_id in auto_messages:
             await event.reply("Ya hay un automensaje activo en este grupo.")
             return
 
-        task = asyncio.create_task(auto_message_loop(group_id, spam_command))
-        auto_messages[group_id] = {
+        # El parámetro especifica el nombre del grupo de origen para reenviar mensajes
+        source_group = event.pattern_match.group(1).strip().lower()
+        if source_group not in group_mapping:
+            await event.reply(f"El grupo '{source_group}' no está registrado en la memoria. Por favor, agrégalo usando /addgrupo {source_group}")
+            return
+
+        if hasattr(chat, 'title') and chat.title:
+            group_alias = chat.title.split()[0].lower()
+        else:
+            group_alias = str(destination_chat_id)
+
+        task = asyncio.create_task(auto_message_loop(destination_chat_id, source_group))
+        auto_messages[destination_chat_id] = {
             "alias": group_alias,
-            "spam_msg": spam_command,
+            "source_group": source_group,
             "task": task
         }
-        await event.reply(f"Automensaje '{spam_command}' agregado para el grupo '{group_alias}' (ID: {group_id}).")
-        print(f"Automensaje agregado para el grupo '{group_alias}' (ID: {group_id}) con comando {spam_command}.")
+        await event.reply(f"Automensaje activado en el grupo '{group_alias}' reenviando mensajes desde el grupo '{source_group}'.")
+        print(f"Automensaje activado en el grupo '{group_alias}' (ID: {destination_chat_id}) reenviando desde '{source_group}'.")
 
     @client.on(events.NewMessage(pattern=r'^/verautomensajes$'))
     async def view_auto_messages_handler(event):
@@ -260,7 +265,7 @@ async def start_bot():
             return
         response = "Automensajes activos:\n"
         for group_id, info in auto_messages.items():
-            response += f"Grupo: {info['alias']} (ID: {group_id}) -> Mensaje: {info['spam_msg']}\n"
+            response += f"Grupo destino: {info['alias']} (ID: {group_id}) -> Reenviando desde: {info['source_group']}\n"
         await event.reply(response)
 
     @client.on(events.NewMessage(pattern=r'^/borrarautomensaje(?: (\S+))?$'))
@@ -268,7 +273,6 @@ async def start_bot():
         if event.sender_id != me.id:
             return
         param = event.pattern_match.group(1)
-        # Si se ejecuta en grupo sin parámetro, se elimina el automensaje del grupo actual
         if event.is_group and not param:
             chat = await event.get_chat()
             group_id = chat.id
@@ -278,17 +282,16 @@ async def start_bot():
             auto_messages[group_id]['task'].cancel()
             del auto_messages[group_id]
             await event.reply("Automensaje eliminado para este grupo.")
-            print(f"Automensaje eliminado para el grupo ID: {group_id}.")
+            print(f"Automensaje eliminado para el grupo destino ID: {group_id}.")
         else:
-            # Si se proporciona un parámetro (alias), se busca y elimina
             param = param.strip().lower() if param else None
             found = False
             for group_id, info in list(auto_messages.items()):
-                if info['alias'] == param:
+                if info['alias'] == param or info['source_group'] == param:
                     auto_messages[group_id]['task'].cancel()
                     del auto_messages[group_id]
                     await event.reply(f"Automensaje eliminado para el grupo '{param}'.")
-                    print(f"Automensaje eliminado para el grupo '{param}' (ID: {group_id}).")
+                    print(f"Automensaje eliminado para el grupo '{param}' (destino ID: {group_id}).")
                     found = True
                     break
             if not found:
@@ -305,4 +308,3 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Error: {e}. Reintentando en 5 segundos...")
             time.sleep(5)
-
