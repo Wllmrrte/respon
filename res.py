@@ -166,7 +166,7 @@ async def start_bot():
             return
 
         if command not in group_mapping:
-            await event.reply(f"Grupo '{command}' no registrado.")
+            await event.reply(f"")
             return
 
         target_entity = group_mapping[command]
